@@ -2203,6 +2203,219 @@ async def delete_video(
 
 
 # =========================================================
+# ADMIN — GIVE FREE ATTEMPTS
+# =========================================================
+
+async def give_free(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+
+    if not context.args or len(context.args) > 2:
+        await update.message.reply_text(
+            "Использование:\n"
+            "/give_free USER_ID [КОЛИЧЕСТВО]\n\n"
+            "Примеры:\n"
+            "/give_free 123456789\n"
+            "/give_free 123456789 3"
+        )
+        return
+
+    try:
+        user_id = int(context.args[0])
+        amount = int(context.args[1]) if len(context.args) == 2 else 1
+    except ValueError:
+        await update.message.reply_text("USER_ID и количество должны быть числами.")
+        return
+
+    if amount < 1 or amount > 100:
+        await update.message.reply_text("Количество попыток должно быть от 1 до 100.")
+        return
+
+    ensure_user(user_id)
+    connection = get_db()
+    connection.execute(
+        "UPDATE users SET free_attempts = free_attempts + ? WHERE user_id = ?",
+        (amount, user_id),
+    )
+    row = connection.execute(
+        "SELECT free_attempts FROM users WHERE user_id = ?", (user_id,)
+    ).fetchone()
+    connection.commit()
+    connection.close()
+
+    total = row["free_attempts"]
+    await update.message.reply_text(
+        "✅ Бесплатные попытки выданы.\n\n"
+        f"👤 User ID: {user_id}\n"
+        f"🎁 Выдано: {amount}\n"
+        f"🎟 Теперь доступно: {total}"
+    )
+    try:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=(
+                "🎁 Тебе выдана бесплатная попытка!\n\n"
+                f"Добавлено попыток: {amount}\n"
+                f"Всего доступно: {total}\n\n"
+                "Открой раздел «Бесплатная попытка», чтобы получить бесплатный материал."
+            ),
+        )
+    except TelegramError:
+        logger.exception("Не удалось уведомить пользователя %s о попытках", user_id)
+
+
+# =========================================================
+# ADMIN — PANEL / STATS / USERS / SUBMISSIONS / PAYMENTS
+# =========================================================
+
+def admin_panel_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📚 Каталог", callback_data="admin:videos"),
+         InlineKeyboardButton("📊 Статистика", callback_data="admin:stats")],
+        [InlineKeyboardButton("👥 Пользователи", callback_data="admin:users"),
+         InlineKeyboardButton("📥 Заявки", callback_data="admin:submissions")],
+        [InlineKeyboardButton("💰 Оплаты", callback_data="admin:payments"),
+         InlineKeyboardButton("🎁 Подарки", callback_data="admin:gifts")],
+        [InlineKeyboardButton("⬅️ Закрыть", callback_data="home")],
+    ])
+
+
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    await update.message.reply_text(
+        "👑 <b>Панель администратора</b>\n\n"
+        "Основные команды доступны также напрямую:\n"
+        "/videos — каталог и ID\n"
+        "/find_video название — поиск\n"
+        "/add_video — добавить материал\n"
+        "/delete_video ID — скрыть материал\n"
+        "/give_free USER_ID [КОЛИЧЕСТВО] — выдать попытки\n"
+        "/bulk_add — массовая загрузка\n"
+        "/bulk_done — закончить загрузку\n"
+        "/bulk_resume — продолжить очередь\n"
+        "/bulk_cancel — отменить очередь\n"
+        "/backup_db — резервная копия базы\n"
+        "/gift_status — статус Business-подарков",
+        parse_mode="HTML",
+        reply_markup=admin_panel_keyboard(),
+    )
+
+
+async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    db=get_db()
+    users=db.execute("SELECT COUNT(*) c FROM users").fetchone()["c"]
+    active=db.execute("SELECT COUNT(*) c FROM content WHERE active=1").fetchone()["c"]
+    total=db.execute("SELECT COUNT(*) c FROM content").fetchone()["c"]
+    submissions=db.execute("SELECT COUNT(*) c FROM submissions").fetchone()["c"]
+    pending=db.execute("SELECT COUNT(*) c FROM submissions WHERE status='pending'").fetchone()["c"]
+    donations=db.execute("SELECT COUNT(*) c, COALESCE(SUM(amount),0) s FROM donations").fetchone()
+    gifts=db.execute("SELECT COUNT(*) c, COALESCE(SUM(gift_star_count),0) s FROM gift_orders WHERE status='completed'").fetchone()
+    db.close()
+    await update.message.reply_text(
+        "📊 <b>Статистика</b>\n\n"
+        f"👥 Пользователей: {users}\n"
+        f"📚 Материалов всего: {total}\n"
+        f"🟢 Активных: {active}\n"
+        f"📥 Заявок: {submissions}\n"
+        f"⏳ На модерации: {pending}\n"
+        f"⭐ Донатов: {donations['c']} на {donations['s']} Stars\n"
+        f"🎁 Оплаченных подарков: {gifts['c']} на {gifts['s']} Stars",
+        parse_mode="HTML",
+    )
+
+
+async def admin_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    db=get_db()
+    rows=db.execute("SELECT user_id, free_attempts, approved_count, viewed_count, search_count FROM users ORDER BY user_id DESC LIMIT 50").fetchall()
+    db.close()
+    if not rows:
+        await update.message.reply_text("Пользователей пока нет.")
+        return
+    lines=["👥 Последние пользователи:",""]
+    for r in rows:
+        lines.append(f"ID {r['user_id']} — 🎟 {r['free_attempts']} | 👁 {r['viewed_count']} | 🔎 {r['search_count']} | ✅ {r['approved_count']}")
+    await update.message.reply_text("\n".join(lines))
+
+
+async def admin_submissions(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    db=get_db()
+    rows=db.execute("SELECT id, user_id, title, status FROM submissions ORDER BY id DESC LIMIT 50").fetchall()
+    db.close()
+    if not rows:
+        await update.message.reply_text("Заявок пока нет.")
+        return
+    lines=["📥 Последние заявки:",""]
+    for r in rows:
+        title=r['title'] or 'без названия'
+        lines.append(f"#{r['id']} — {r['status']} — User {r['user_id']} — {title}")
+    await update.message.reply_text("\n".join(lines))
+
+
+async def admin_payments(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    db=get_db()
+    rows=db.execute("SELECT charge_id, user_id, content_id, amount FROM payments ORDER BY rowid DESC LIMIT 50").fetchall()
+    gifts=db.execute("SELECT order_id, user_id, content_id, expected_price, status FROM gift_orders ORDER BY order_id DESC LIMIT 50").fetchall()
+    db.close()
+    lines=["💰 Последние оплаты:",""]
+    if rows:
+        lines += [f"⭐ Stars: {r['charge_id']} — User {r['user_id']} — материал #{r['content_id']} — {r['amount']} ⭐" for r in rows]
+    else:
+        lines.append("Stars-оплат пока нет.")
+    if gifts:
+        lines += [f"🎁 Gift #{r['order_id']} — User {r['user_id']} — материал #{r['content_id']} — {r['expected_price']} ⭐ — {r['status']}" for r in gifts]
+    await update.message.reply_text("\n".join(lines[:102]))
+
+
+async def admin_donations(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    db=get_db()
+    rows=db.execute("SELECT charge_id, user_id, amount FROM donations ORDER BY rowid DESC LIMIT 50").fetchall()
+    db.close()
+    if not rows:
+        await update.message.reply_text("Донатов пока нет.")
+        return
+    await update.message.reply_text("💙 Последние донаты:\n\n" + "\n".join(f"{r['amount']} ⭐ — User {r['user_id']} — {r['charge_id']}" for r in rows))
+
+
+async def admin_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query=update.callback_query
+    if query.from_user.id not in ADMIN_IDS:
+        await query.answer("Нет доступа", show_alert=True)
+        return
+    await query.answer()
+    key=query.data.split(":",1)[1]
+    # Reuse the command functions with a lightweight fake-free response where possible.
+    if key == "videos":
+        db=get_db(); rows=db.execute("SELECT id,name,price,active,is_free_prize,media_type FROM content ORDER BY id DESC LIMIT 100").fetchall(); db.close()
+        text="📚 Каталог:\n\n" + ("\n".join(f"{'🟢' if r['active'] else '🔴'} #{r['id']} — {r['name']} — {r['price']} ⭐ — {'🖼' if r['media_type']=='photo' else '🎬'}" for r in rows) if rows else "Каталог пуст.")
+        await query.edit_message_text(text, reply_markup=admin_panel_keyboard())
+    elif key == "stats":
+        db=get_db(); u=db.execute("SELECT COUNT(*) c FROM users").fetchone()['c']; a=db.execute("SELECT COUNT(*) c FROM content WHERE active=1").fetchone()['c']; p=db.execute("SELECT COUNT(*) c FROM submissions WHERE status='pending'").fetchone()['c']; d=db.execute("SELECT COALESCE(SUM(amount),0) s FROM donations").fetchone()['s']; g=db.execute("SELECT COALESCE(SUM(gift_star_count),0) s FROM gift_orders WHERE status='completed'").fetchone()['s']; db.close()
+        await query.edit_message_text(f"📊 Статистика\n\n👥 Пользователи: {u}\n🟢 Активные материалы: {a}\n⏳ Заявки: {p}\n⭐ Донаты: {d}\n🎁 Подарки: {g}", reply_markup=admin_panel_keyboard())
+    elif key == "users":
+        db=get_db(); rows=db.execute("SELECT user_id,free_attempts FROM users ORDER BY user_id DESC LIMIT 30").fetchall(); db.close()
+        await query.edit_message_text("👥 Пользователи:\n\n" + ("\n".join(f"{r['user_id']} — 🎟 {r['free_attempts']}" for r in rows) if rows else "Пусто."), reply_markup=admin_panel_keyboard())
+    elif key == "submissions":
+        db=get_db(); rows=db.execute("SELECT id,user_id,title,status FROM submissions ORDER BY id DESC LIMIT 30").fetchall(); db.close()
+        await query.edit_message_text("📥 Заявки:\n\n" + ("\n".join(f"#{r['id']} — {r['status']} — {r['user_id']} — {r['title'] or 'без названия'}" for r in rows) if rows else "Пусто."), reply_markup=admin_panel_keyboard())
+    elif key == "payments":
+        db=get_db(); rows=db.execute("SELECT order_id,user_id,content_id,expected_price,status FROM gift_orders ORDER BY order_id DESC LIMIT 30").fetchall(); db.close()
+        await query.edit_message_text("💰 Подарочные оплаты:\n\n" + ("\n".join(f"#{r['order_id']} — User {r['user_id']} — #{r['content_id']} — {r['expected_price']} ⭐ — {r['status']}" for r in rows) if rows else "Пусто."), reply_markup=admin_panel_keyboard())
+    elif key == "gifts":
+        await query.edit_message_text("🎁 Для полной проверки Business-подарков используй /gift_status.", reply_markup=admin_panel_keyboard())
+
+
+# =========================================================
 # HOME / BOTTOM BUTTONS
 # =========================================================
 
@@ -2342,18 +2555,24 @@ def main():
     application.add_handler(CommandHandler("donate", donate_command))
     application.add_handler(PreCheckoutQueryHandler(donation_pre_checkout))
     application.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, donation_successful_payment))
+    application.add_handler(CommandHandler("admin", admin_panel))
+    application.add_handler(CommandHandler("stats", admin_stats))
+    application.add_handler(CommandHandler("users", admin_users))
+    application.add_handler(CommandHandler("submissions", admin_submissions))
+    application.add_handler(CommandHandler("payments", admin_payments))
+    application.add_handler(CommandHandler("donations", admin_donations))
     application.add_handler(CommandHandler("videos", admin_videos))
     application.add_handler(CommandHandler("backup_db", backup_db))
     application.add_handler(CommandHandler("delete_video", delete_video))
     application.add_handler(CommandHandler("find_video", find_video))
+    application.add_handler(CommandHandler("give_free", give_free))
     application.add_handler(bulk_add_conversation)
     application.add_handler(add_video_conversation)
     application.add_handler(CommandHandler("bulk_cancel", bulk_cancel))
 
     # Inline buttons
-    application.add_handler(
-        CallbackQueryHandler(show_catalog, pattern=r"^catalog$")
-    )
+    application.add_handler(CallbackQueryHandler(admin_callback, pattern=r"^admin:(videos|stats|users|submissions|payments|gifts)$"))
+    application.add_handler(CallbackQueryHandler(show_catalog, pattern=r"^catalog$"))
     application.add_handler(
         CallbackQueryHandler(donate_menu, pattern=r"^donate$")
     )

@@ -4,7 +4,7 @@ import asyncio
 import uuid
 import logging
 from dotenv import load_dotenv
-load_dotenv(".env.txt")
+
 from telegram import (
     Update,
     InlineKeyboardButton,
